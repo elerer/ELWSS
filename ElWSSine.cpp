@@ -1,10 +1,17 @@
 #include "ElWSSine.h"
-using websocketpp::lib::placeholders::_1;
-using websocketpp::lib::placeholders::_2;
-using websocketpp::lib::bind;
+#include <functional>
+#include <iostream>
+#include <thread>
+#include <chrono>
+#include <mutex>
+#include <condition_variable>
+using namespace std::placeholders;
 
-ElWSSine::ElWSSine(websocketpp::server<websocketpp::config::asio>&  server,const std::string& wavFile,const size_t& freq):
-_server(server),
+std::mutex mu;
+std::condition_variable cv;
+
+ElWSSine::ElWSSine(uWS::Hub& h,const std::string& wavFile,const size_t& freq):
+_server(h),
 _fs(wavFile.c_str(),std::ifstream::binary),
 _frequency(freq)
 {
@@ -15,11 +22,15 @@ _frequency(freq)
   //Set header and remove unwanted segments
   _wHeader.NormalizeWavHeaderOfBuffer(_buffer,1000,_origHeaderLength,mod);
   //set template header
-  _wHeader.setSizeFieldsRelatedToDataLength(1000);
+  _wHeader.setSizeFieldsRelatedToDataLength(_samplesPerSend);
 
   std::cout << "Samplerate " << _wHeader._SampleRate << '\n';
   std::cout << "_NumChannels " << _wHeader._NumChannels << '\n';
   std::cout << "_BitsPerSample " << _wHeader._BitsPerSample << '\n';
+
+  _millisecPerSend = ((float)_samplesPerSend/(_wHeader._SampleRate*_wHeader._NumChannels))*1000;
+
+  std::cout << "_millisecPerSend " << _millisecPerSend << '\n';
 
   _bytesPerSample = _wHeader._BitsPerSample/8;
   std::cout << "bytes per sample " << _bytesPerSample << '\n';
@@ -28,8 +39,8 @@ _frequency(freq)
   //Set wavHeader as the prefix for all sends
   memcpy(_buffer,(char*)&_wHeader,44);
 
-  std::thread th(&ElWSSine::streamToConnection,this);
-  _th = std::move(th);
+
+  _th = std::move(std::thread(&ElWSSine::sendToSocket,this));
 
 }
 
@@ -45,32 +56,44 @@ void ElWSSine::caculateStep()
   std::cout << "step is " << _step << '\n';
 }
 
-
-void ElWSSine::streamToConnection()
+void ElWSSine::on_connect(uWS::WebSocket<uWS::SERVER> *ws,uWS::HttpRequest req)
 {
-  try
-  {
+  std::unique_lock<std::mutex> lock(mu);
+  std::cout << "got ws socket" << '\n';
+  _ws = ws;
+  cv.notify_one();
+}
+
+void ElWSSine::on_message(uWS::WebSocket<uWS::SERVER> *ws, char *message, size_t length, uWS::OpCode opCode)
+{
+  std::cout << "got msg" << '\n';
+}
+
+void ElWSSine::sendToSocket()
+{
+
     double dSample = 0;
     float flSample = 0;
     short sixteenBitSample = 0;
     char  eightBitSample = 0;
     int32_t twentyfourBitSample = 0;
     char* source = nullptr;
-    size_t iterations = 1000/(_bytesPerSample*_wHeader._NumChannels);
+    size_t iterations = _samplesPerSend/(_bytesPerSample*_wHeader._NumChannels);
     size_t totalBytesToSend = iterations*(_bytesPerSample*_wHeader._NumChannels);
 
-    std::unique_lock<std::mutex> lock(_lock);
+    bool loop = true;
 
-    while(_connectios.empty())
     {
-        _cond.wait(lock);
+          std::unique_lock<std::mutex> lock(mu);
+          while(!_ws)
+          {
+            cv.wait(lock);
+          }
+
     }
 
-    auto it_hdl = _connectios.begin();
-
-    while(true)
+    while(loop)
     {
-
       size_t bytes = 0;
 
       for (size_t i = 0; i < iterations; i++)
@@ -106,32 +129,16 @@ void ElWSSine::streamToConnection()
       }
 
       size_t size =  44 + totalBytesToSend;
-      _server.send(*it_hdl, _buffer,size , websocketpp::frame::opcode::binary);
-      std::cout << "send to ws" << '\n';
-    }
-  }
+      _ws->send(_buffer,size , uWS::OpCode::BINARY);
+    //  std::cout << "send to ws" << '\n';
+      std::this_thread::sleep_for(std::chrono::milliseconds(_millisecPerSend/10));
 
-  catch (const websocketpp::lib::error_code& e)
-  {
-    std::cout << "send failed because: " << e
-              << "(" << e.message() << ")" << std::endl;
-  }
+      //loop = false
 
-}
-
-void ElWSSine::on_open(websocketpp::connection_hdl hdl)
-{
-    {
-        std::cout << "on_open" << '\n';
-        std::lock_guard<std::mutex> guard(_lock);
-        if (_connectios.empty())
-         {
-           _connectios.insert(hdl);
-           _cond.notify_one();
-         }
     }
 
 }
+
 
 
 void ElWSSine::generateOneSample(double& val)
@@ -143,5 +150,6 @@ void ElWSSine::generateOneSample(double& val)
 
 void ElWSSine::setCallbacks()
 {
-  _server.set_open_handler(bind(&ElWSSine::on_open,this,::_1));
+  _server.onMessage(std::bind(&ElWSSine::on_message,this,::_1,::_2,::_3,::_4));
+  _server.onConnection(std::bind(&ElWSSine::on_connect,this,::_1,::_2));
 }

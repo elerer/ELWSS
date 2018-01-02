@@ -1,15 +1,15 @@
-#include "WebsocketServer.h"
+#include <uWS/uWS.h>
 #include "ElWSSine.h"
 
 int main()
 {
-  WebsocketServer wss(8082);
-  wss.setLogging();
-  wss.init();
+	uWS::Hub h;
 
-  ElWSSine sineWav(wss.getServerToSetCallback(),"/home/eranl/WAV_FILES/cello.wav",440);
-  sineWav.setCallbacks();
+	ElWSSine sineWav(h,"/home/eranl/WAV_FILES/cello.wav",440);
+	sineWav.setCallbacks();
 
-  wss.start();
-
+	if (h.listen(3000))
+	{
+	        h.run();
+	}
 }
